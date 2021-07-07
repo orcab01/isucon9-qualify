@@ -17,6 +17,18 @@ CREATE TABLE `users` (
   `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4;
 
+DROP TABLE IF EXISTS `my_users`;
+CREATE TABLE `my_users` (
+  `id` bigint NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `account_name` varchar(128) NOT NULL UNIQUE,
+  `hashed_password` varchar(64) NOT NULL,
+  `salt` varchar(22) NOT NULL,
+  `address` varchar(191) NOT NULL,
+  `num_sell_items` int unsigned NOT NULL DEFAULT 0,
+  `last_bump` datetime NOT NULL DEFAULT '2000-01-01 00:00:00',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4;
+
 DROP TABLE IF EXISTS `items`;
 CREATE TABLE `items` (
   `id` bigint NOT NULL AUTO_INCREMENT PRIMARY KEY,

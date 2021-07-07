@@ -1,10 +1,16 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	crand "crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"html/template"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -19,7 +25,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorilla/sessions"
 	"github.com/jmoiron/sqlx"
-	"golang.org/x/crypto/bcrypt"
 
 	_ "net/http/pprof"
 )
@@ -73,9 +78,11 @@ type Config struct {
 }
 
 type User struct {
-	ID             int64     `json:"id" db:"id"`
-	AccountName    string    `json:"account_name" db:"account_name"`
-	HashedPassword []byte    `json:"-" db:"hashed_password"`
+	ID          int64  `json:"id" db:"id"`
+	AccountName string `json:"account_name" db:"account_name"`
+	// HashedPassword []byte    `json:"-" db:"hashed_password"`
+	HashedPassword string    `json:"-" db:"hashed_password"`
+	Salt           string    `json:"-" db:"salt"`
 	Address        string    `json:"address,omitempty" db:"address"`
 	NumSellItems   int       `json:"num_sell_items" db:"num_sell_items"`
 	LastBump       time.Time `json:"-" db:"last_bump"`
@@ -442,7 +449,8 @@ func getUser(c *gin.Context) (user User, errCode int, errMsg string) {
 		return user, http.StatusNotFound, "no session"
 	}
 
-	err := dbx.Get(&user, "SELECT * FROM `users` WHERE `id` = ?", userID)
+	// err := dbx.Get(&user, "SELECT * FROM `users` WHERE `id` = ?", userID)
+	err := dbx.Get(&user, "SELECT * FROM `my_users` WHERE `id` = ?", userID)
 	if err == sql.ErrNoRows {
 		return user, http.StatusNotFound, "user not found"
 	}
@@ -456,7 +464,8 @@ func getUser(c *gin.Context) (user User, errCode int, errMsg string) {
 
 func getUserSimpleByID(q sqlx.Queryer, userID int64) (userSimple UserSimple, err error) {
 	user := User{}
-	err = sqlx.Get(q, &user, "SELECT `id`, `account_name`, `num_sell_items` FROM `users` WHERE `id` = ?", userID)
+	// err = sqlx.Get(q, &user, "SELECT `id`, `account_name`, `num_sell_items` FROM `users` WHERE `id` = ?", userID)
+	err = sqlx.Get(q, &user, "SELECT `id`, `account_name`, `num_sell_items` FROM `my_users` WHERE `id` = ?", userID)
 	if err != nil {
 		return userSimple, err
 	}
@@ -593,14 +602,19 @@ func getNewItems(c *gin.Context) {
 		err := dbx.Select(&items,
 			"SELECT"+
 				"  `items`.*,"+
-				"  `users`.`id` AS `seller.id`,"+
-				"  `users`.`account_name` AS `seller.account_name`,"+
-				"  `users`.`num_sell_items` AS `seller.num_sell_items` "+
+				// "  `users`.`id` AS `seller.id`,"+
+				// "  `users`.`account_name` AS `seller.account_name`,"+
+				// "  `users`.`num_sell_items` AS `seller.num_sell_items` "+
+				"  `my_users`.`id` AS `seller.id`,"+
+				"  `my_users`.`account_name` AS `seller.account_name`,"+
+				"  `my_users`.`num_sell_items` AS `seller.num_sell_items` "+
 				"FROM"+
 				"  `items`"+
 				"  LEFT JOIN"+
-				"    `users`"+
-				"  ON  `items`.`seller_id` = `users`.`id` "+
+				// "    `users`"+
+				// "  ON  `items`.`seller_id` = `users`.`id` "+
+				"    `my_users`"+
+				"  ON  `items`.`seller_id` = `my_users`.`id` "+
 				"WHERE"+
 				"  `items`.`status` IN(?, ?) "+
 				"AND ("+
@@ -631,14 +645,19 @@ func getNewItems(c *gin.Context) {
 		err := dbx.Select(&items,
 			"SELECT"+
 				"  `items`.*,"+
-				"  `users`.`id` AS `seller.id`,"+
-				"  `users`.`account_name` AS `seller.account_name`,"+
-				"  `users`.`num_sell_items` AS `seller.num_sell_items` "+
+				// "  `users`.`id` AS `seller.id`,"+
+				// "  `users`.`account_name` AS `seller.account_name`,"+
+				// "  `users`.`num_sell_items` AS `seller.num_sell_items` "+
+				"  `my_users`.`id` AS `seller.id`,"+
+				"  `my_users`.`account_name` AS `seller.account_name`,"+
+				"  `my_users`.`num_sell_items` AS `seller.num_sell_items` "+
 				"FROM"+
 				"  `items`"+
 				"  LEFT JOIN"+
-				"    `users`"+
-				"  ON  `items`.`seller_id` = `users`.`id` "+
+				// "    `users`"+
+				// "  ON  `items`.`seller_id` = `users`.`id` "+
+				"    `my_users`"+
+				"  ON  `items`.`seller_id` = `my_users`.`id` "+
 				"WHERE"+
 				"  `status` IN(?, ?) "+
 				"ORDER BY"+
@@ -751,14 +770,19 @@ func getNewCategoryItems(c *gin.Context) {
 		inQuery, inArgs, err = sqlx.In(
 			"SELECT"+
 				"  `items`.*,"+
-				"  `users`.`id` AS `seller.id`,"+
-				"  `users`.`account_name` AS `seller.account_name`,"+
-				"  `users`.`num_sell_items` AS `seller.num_sell_items` "+
+				// "  `users`.`id` AS `seller.id`,"+
+				// "  `users`.`account_name` AS `seller.account_name`,"+
+				// "  `users`.`num_sell_items` AS `seller.num_sell_items` "+
+				"  `my_users`.`id` AS `seller.id`,"+
+				"  `my_users`.`account_name` AS `seller.account_name`,"+
+				"  `my_users`.`num_sell_items` AS `seller.num_sell_items` "+
 				"FROM"+
 				"  `items`"+
 				"  LEFT JOIN"+
-				"    `users`"+
-				"  ON  `items`.`seller_id` = `users`.`id` "+
+				// "    `users`"+
+				// "  ON  `items`.`seller_id` = `users`.`id` "+
+				"    `my_users`"+
+				"  ON  `items`.`seller_id` = `my_users`.`id` "+
 				"WHERE"+
 				"  `items`.`status` IN(?, ?) "+
 				"AND category_id IN(?) "+
@@ -791,14 +815,19 @@ func getNewCategoryItems(c *gin.Context) {
 		inQuery, inArgs, err = sqlx.In(
 			"SELECT"+
 				"  `items`.*,"+
-				"  `users`.`id` AS `seller.id`,"+
-				"  `users`.`account_name` AS `seller.account_name`,"+
-				"  `users`.`num_sell_items` AS `seller.num_sell_items` "+
+				// "  `users`.`id` AS `seller.id`,"+
+				// "  `users`.`account_name` AS `seller.account_name`,"+
+				// "  `users`.`num_sell_items` AS `seller.num_sell_items` "+
+				"  `my_users`.`id` AS `seller.id`,"+
+				"  `my_users`.`account_name` AS `seller.account_name`,"+
+				"  `my_users`.`num_sell_items` AS `seller.num_sell_items` "+
 				"FROM"+
 				"  `items`"+
 				"  LEFT JOIN"+
-				"    `users`"+
-				"  ON  `items`.`seller_id` = `users`.`id` "+
+				// "    `users`"+
+				// "  ON  `items`.`seller_id` = `users`.`id` "+
+				"    `my_users`"+
+				"  ON  `items`.`seller_id` = `my_users`.`id` "+
 				"WHERE"+
 				"  `items`.`status` IN(?, ?) "+
 				"AND `items`.`category_id` IN(?) "+
@@ -1036,10 +1065,12 @@ func getTransactions(c *gin.Context) {
 				"FROM"+
 				"  `items`"+
 				"  LEFT JOIN"+
-				"    `users` AS `seller`"+
+				// "    `users` AS `seller`"+
+				"    `my_users` AS `seller`"+
 				"  ON  `items`.`seller_id` = `seller`.`id`"+
 				"  LEFT JOIN"+
-				"    `users` AS `buyer`"+
+				// "    `users` AS `buyer`"+
+				"    `my_users` AS `buyer`"+
 				"  ON  `items`.`buyer_id` = `buyer`.`id` "+
 				"WHERE"+
 				"  ("+
@@ -1090,10 +1121,12 @@ func getTransactions(c *gin.Context) {
 				"FROM"+
 				"  `items`"+
 				"  LEFT JOIN"+
-				"    `users` AS `seller`"+
+				// "    `users` AS `seller`"+
+				"    `my_users` AS `seller`"+
 				"  ON  `items`.`seller_id` = `seller`.`id`"+
 				"  LEFT JOIN"+
-				"    `users` AS `buyer`"+
+				// "    `users` AS `buyer`"+
+				"    `my_users` AS `buyer`"+
 				"  ON  `items`.`buyer_id` = `buyer`.`id` "+
 				"WHERE"+
 				"  ("+
@@ -1552,7 +1585,8 @@ func postBuy(c *gin.Context) {
 	}
 
 	seller := User{}
-	err = tx.Get(&seller, "SELECT * FROM `users` WHERE `id` = ? FOR UPDATE", targetItem.SellerID)
+	// err = tx.Get(&seller, "SELECT * FROM `users` WHERE `id` = ? FOR UPDATE", targetItem.SellerID)
+	err = tx.Get(&seller, "SELECT * FROM `my_users` WHERE `id` = ? FOR UPDATE", targetItem.SellerID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(c, http.StatusNotFound, "seller not found")
 		tx.Rollback()
@@ -2209,7 +2243,8 @@ func postSell(c *gin.Context) {
 	tx := dbx.MustBegin()
 
 	seller := User{}
-	err = tx.Get(&seller, "SELECT * FROM `users` WHERE `id` = ? FOR UPDATE", user.ID)
+	// err = tx.Get(&seller, "SELECT * FROM `users` WHERE `id` = ? FOR UPDATE", user.ID)
+	err = tx.Get(&seller, "SELECT * FROM `my_users` WHERE `id` = ? FOR UPDATE", user.ID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(c, http.StatusNotFound, "user not found")
 		tx.Rollback()
@@ -2247,7 +2282,9 @@ func postSell(c *gin.Context) {
 	}
 
 	now := time.Now()
-	_, err = tx.Exec("UPDATE `users` SET `num_sell_items`=?, `last_bump`=? WHERE `id`=?",
+	// _, err = tx.Exec("UPDATE `users` SET `num_sell_items`=?, `last_bump`=? WHERE `id`=?",
+	_, err = tx.Exec("UPDATE `my_users` SET `num_sell_items`=?, `last_bump`=? WHERE `id`=?",
+
 		seller.NumSellItems+1,
 		now,
 		seller.ID,
@@ -2316,7 +2353,8 @@ func postBump(c *gin.Context) {
 	}
 
 	seller := User{}
-	err = tx.Get(&seller, "SELECT * FROM `users` WHERE `id` = ? FOR UPDATE", user.ID)
+	// err = tx.Get(&seller, "SELECT * FROM `users` WHERE `id` = ? FOR UPDATE", user.ID)
+	err = tx.Get(&seller, "SELECT * FROM `my_users` WHERE `id` = ? FOR UPDATE", user.ID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(c, http.StatusNotFound, "user not found")
 		tx.Rollback()
@@ -2348,7 +2386,8 @@ func postBump(c *gin.Context) {
 		return
 	}
 
-	_, err = tx.Exec("UPDATE `users` SET `last_bump`=? WHERE id=?",
+	// _, err = tx.Exec("UPDATE `users` SET `last_bump`=? WHERE id=?",
+	_, err = tx.Exec("UPDATE `my_users` SET `last_bump`=? WHERE id=?",
 		now,
 		seller.ID,
 	)
@@ -2420,7 +2459,8 @@ func postLogin(c *gin.Context) {
 	}
 
 	u := User{}
-	err = dbx.Get(&u, "SELECT * FROM `users` WHERE `account_name` = ?", accountName)
+	// err = dbx.Get(&u, "SELECT * FROM `users` WHERE `account_name` = ?", accountName)
+	err = dbx.Get(&u, "SELECT * FROM `my_users` WHERE `account_name` = ?", accountName)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(c, http.StatusUnauthorized, "アカウント名かパスワードが間違えています")
 		return
@@ -2432,8 +2472,11 @@ func postLogin(c *gin.Context) {
 		return
 	}
 
-	err = bcrypt.CompareHashAndPassword(u.HashedPassword, []byte(password))
-	if err == bcrypt.ErrMismatchedHashAndPassword {
+	h := hmac.New(sha256.New, []byte(u.Salt))
+	h.Write([]byte(password))
+	// err = bcrypt.CompareHashAndPassword(u.HashedPassword, []byte(password))
+	// if err == bcrypt.ErrMismatchedHashAndPassword {
+	if u.HashedPassword != hex.EncodeToString(h.Sum(nil)) {
 		outputErrorMsg(c, http.StatusUnauthorized, "アカウント名かパスワードが間違えています")
 		return
 	}
@@ -2476,17 +2519,38 @@ func postRegister(c *gin.Context) {
 		return
 	}
 
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
+	unencodedSalt := make([]byte, 16)
+	_, err = io.ReadFull(rand.Reader, unencodedSalt)
 	if err != nil {
 		log.Print(err)
 
 		outputErrorMsg(c, http.StatusInternalServerError, "error")
 		return
 	}
+	encoding := base64.NewEncoding("./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+	n := encoding.EncodedLen(len(unencodedSalt))
+	salt := make([]byte, n)
+	encoding.Encode(salt, unencodedSalt)
+	for salt[n-1] == '=' {
+		n--
+	}
 
-	result, err := dbx.Exec("INSERT INTO `users` (`account_name`, `hashed_password`, `address`) VALUES (?, ?, ?)",
+	h := hmac.New(sha256.New, []byte(salt[:n]))
+	h.Write([]byte(password))
+	hashedPassword := hex.EncodeToString(h.Sum(nil))
+
+	// hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
+	// if err != nil {
+	// 	log.Print(err)
+
+	// 	outputErrorMsg(c, http.StatusInternalServerError, "error")
+	// 	return
+	// }
+
+	result, err := dbx.Exec("INSERT INTO `my_users` (`account_name`, `salt`, `hashed_password`, `address`) VALUES (?, ?, ?, ?)",
 		accountName,
 		hashedPassword,
+		salt[:n],
 		address,
 	)
 	if err != nil {
