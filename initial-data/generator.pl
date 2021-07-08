@@ -153,23 +153,6 @@ sub gen_passwd {
 
 sub encrypt_password {
     my $password = shift;
-    my $hex = Digest::SHA::hmac_sha256_hex($password);
-    if (-f "pwcache/$hex.txt") {
-        open(my $fh, "pwcache/$hex.txt");
-        my $encrypted = do {local $/; <$fh>};
-        chomp $encrypted;
-        return $encrypted;
-    }
-    my $salt = shift || Crypt::Eksblowfish::Bcrypt::en_base64(Crypt::OpenSSL::Random::random_bytes(16));
-    my $settings = '$2a$10$'.$salt;
-    my $encrypted = Crypt::Eksblowfish::Bcrypt::bcrypt($password, $settings);
-    open(my $fh, ">", "pwcache/$hex.txt") or die $!;
-    print $fh $encrypted;
-    return $encrypted;
-}
-
-sub my_encrypt_password {
-    my $password = shift;
     my $salt = shift || Crypt::Eksblowfish::Bcrypt::en_base64(Crypt::OpenSSL::Random::random_bytes(16));
     my $encrypted = Digest::SHA::hmac_sha256_hex($password, $salt);
     return ($encrypted, $salt);
@@ -208,21 +191,11 @@ sub create_user {
 
 sub flush_users {
     my @insert_users = ();
-    my @insert_my_users = ();
     for my $user (values %users) {
         delete $user->{buy_category_id};
         print $users_fh JSON::encode_json($user)."\n";
+        my ($encrypted, $salt) = encrypt_password($user->{plain_passwd});
         push @insert_users,
-            sprintf(q!(%d,'%s','%s','%s', %d,'%s')!,
-            $user->{id},
-            $user->{account_name},
-            encrypt_password($user->{plain_passwd}),
-            $user->{address},
-            $user->{num_sell_items},
-            format_mysql($user->{created_at})
-        );
-        my ($encrypted, $salt) = my_encrypt_password($user->{plain_passwd});
-        push @insert_my_users,
             sprintf(q!(%d,'%s','%s','%s','%s', %d,'%s')!,
             $user->{id},
             $user->{account_name},
@@ -233,14 +206,11 @@ sub flush_users {
             format_mysql($user->{created_at})
         );
         if (@insert_users > 500) {
-            print $sql_fh q!INSERT INTO `users` (`id`,`account_name`,`hashed_password`,`address`,`num_sell_items`,`created_at`) VALUES ! . join(", ", @insert_users) . ";\n";
-            print $sql_fh q!INSERT INTO `my_users` (`id`,`account_name`,`hashed_password`,`salt`,`address`,`num_sell_items`,`created_at`) VALUES ! . join(", ", @insert_my_users) . ";\n";
+            print $sql_fh q!INSERT INTO `users` (`id`,`account_name`,`hashed_password`,`salt`,`address`,`num_sell_items`,`created_at`) VALUES ! . join(", ", @insert_users) . ";\n";
             @insert_users = ();
-            @insert_my_users = ();
         }
     }
-    print $sql_fh q!INSERT INTO `users` (`id`,`account_name`,`hashed_password`,`address`,`num_sell_items`,`created_at`) VALUES ! . join(", ", @insert_users) . ";\n";
-    print $sql_fh q!INSERT INTO `my_users` (`id`,`account_name`,`hashed_password`,`salt`,`address`,`num_sell_items`,`created_at`) VALUES ! . join(", ", @insert_my_users) . ";\n";
+    print $sql_fh q!INSERT INTO `users` (`id`,`account_name`,`hashed_password`,`salt`,`address`,`num_sell_items`,`created_at`) VALUES ! . join(", ", @insert_users) . ";\n";
 
     for my $active_seller_id (@active_seller) {
         my $user = $users{$active_seller_id};
