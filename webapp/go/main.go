@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/hmac"
 	"crypto/rand"
-	crand "crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -302,6 +301,12 @@ type resSetting struct {
 func init() {
 	store = sessions.NewCookieStore([]byte("abc"))
 
+	file, err := os.OpenFile("error.log", os.O_RDWR|os.O_CREATE|os.O_APPEND, 0644)
+	writer := io.MultiWriter(os.Stdout, file)
+	if err != nil {
+		log.Fatalf("error opening file: %v", err)
+	}
+	log.SetOutput(writer)
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
 	templates = template.Must(template.ParseFiles(
@@ -311,7 +316,7 @@ func init() {
 
 func main() {
 	go func() {
-		log.Println(http.ListenAndServe("localhost:6060", nil))
+		log.Println(http.ListenAndServe(":6060", nil))
 	}()
 
 	host := os.Getenv("MYSQL_HOST")
@@ -564,7 +569,7 @@ func postInitialize(c *gin.Context) {
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
-		Campaign: 0,
+		Campaign: 4,
 		// 実装言語を返す
 		Language: "Go",
 	}
@@ -2272,7 +2277,7 @@ func postSell(c *gin.Context) {
 
 func secureRandomStr(b int) string {
 	k := make([]byte, b)
-	if _, err := crand.Read(k); err != nil {
+	if _, err := rand.Read(k); err != nil {
 		panic(err)
 	}
 	return fmt.Sprintf("%x", k)
