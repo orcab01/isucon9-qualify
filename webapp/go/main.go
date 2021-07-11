@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -1213,19 +1214,19 @@ func getTransactions(c *gin.Context) {
 				tx.Rollback()
 				return
 			}
-			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: shipping.ReserveID,
-			})
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(c, http.StatusInternalServerError, "failed to request to shipment service")
-				tx.Rollback()
-				return
-			}
+			// ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+			// 	ReserveID: shipping.ReserveID,
+			// })
+			// if err != nil {
+			// 	log.Print(err)
+			// 	outputErrorMsg(c, http.StatusInternalServerError, "failed to request to shipment service")
+			// 	tx.Rollback()
+			// 	return
+			// }
 
 			itemDetail.TransactionEvidenceID = transactionEvidence.ID
 			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = ssr.Status
+			itemDetail.ShippingStatus = shipping.Status
 		}
 
 		itemDetails = append(itemDetails, itemDetail)
@@ -1417,9 +1418,10 @@ func postItemEdit(c *gin.Context) {
 		return
 	}
 
+	now := time.Now()
 	_, err = tx.Exec("UPDATE `items` SET `price` = ?, `updated_at` = ? WHERE `id` = ?",
 		price,
-		time.Now(),
+		now,
 		itemID,
 	)
 	if err != nil {
@@ -1430,21 +1432,21 @@ func postItemEdit(c *gin.Context) {
 		return
 	}
 
-	err = tx.Get(&targetItem, "SELECT * FROM `items` WHERE `id` = ?", itemID)
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(c, http.StatusInternalServerError, "db error")
-		tx.Rollback()
-		return
-	}
+	// err = tx.Get(&targetItem, "SELECT * FROM `items` WHERE `id` = ?", itemID)
+	// if err != nil {
+	// 	log.Print(err)
+	// 	outputErrorMsg(c, http.StatusInternalServerError, "db error")
+	// 	tx.Rollback()
+	// 	return
+	// }
 
 	tx.Commit()
 
 	c.JSON(http.StatusOK, &resItemEdit{
-		ItemID:        targetItem.ID,
-		ItemPrice:     targetItem.Price,
+		ItemID:        itemID,
+		ItemPrice:     price,
 		ItemCreatedAt: targetItem.CreatedAt.Unix(),
-		ItemUpdatedAt: targetItem.UpdatedAt.Unix(),
+		ItemUpdatedAt: now.Unix(),
 	})
 }
 
@@ -1564,7 +1566,7 @@ func postBuy(c *gin.Context) {
 	}
 
 	seller := User{}
-	err = tx.Get(&seller, "SELECT * FROM `users` WHERE `id` = ? FOR UPDATE", targetItem.SellerID)
+	err = tx.Get(&seller, "SELECT * FROM `users` WHERE `id` = ?", targetItem.SellerID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(c, http.StatusNotFound, "seller not found")
 		tx.Rollback()
@@ -1587,62 +1589,95 @@ func postBuy(c *gin.Context) {
 		return
 	}
 
-	result, err := tx.Exec("INSERT INTO `transaction_evidences` (`seller_id`, `buyer_id`, `status`, `item_id`, `item_name`, `item_price`, `item_description`,`item_category_id`,`item_root_category_id`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		targetItem.SellerID,
-		buyer.ID,
-		TransactionEvidenceStatusWaitShipping,
-		targetItem.ID,
-		targetItem.Name,
-		targetItem.Price,
-		targetItem.Description,
-		category.ID,
-		category.ParentID,
-	)
-	if err != nil {
-		log.Print(err)
+	// WaitGroupの設定
+	// 決済処理直前まで非同期処理
+	var wg sync.WaitGroup
+	// エラー発生時のエラーチャネル
+	chanError := make(chan error, 3)
+	defer close(chanError)
 
-		outputErrorMsg(c, http.StatusInternalServerError, "db error")
+	// 取引情報追加の非同期処理
+	chanTransactionEvidenceID := make(chan int64, 1)
+	defer close(chanTransactionEvidenceID)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		result, err := tx.Exec("INSERT INTO `transaction_evidences` (`seller_id`, `buyer_id`, `status`, `item_id`, `item_name`, `item_price`, `item_description`,`item_category_id`,`item_root_category_id`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			targetItem.SellerID,
+			buyer.ID,
+			TransactionEvidenceStatusWaitShipping,
+			targetItem.ID,
+			targetItem.Name,
+			targetItem.Price,
+			targetItem.Description,
+			category.ID,
+			category.ParentID,
+		)
+		if err != nil {
+			log.Print(err)
+			chanError <- fmt.Errorf("db error")
+			return
+		}
+
+		transactionEvidenceID, err := result.LastInsertId()
+		if err != nil {
+			log.Print(err)
+			chanError <- fmt.Errorf("db error")
+			return
+		}
+		chanTransactionEvidenceID <- transactionEvidenceID
+	}()
+
+	// 商品情報更新の非同期処理
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, err = tx.Exec("UPDATE `items` SET `buyer_id` = ?, `status` = ?, `updated_at` = ? WHERE `id` = ?",
+			buyer.ID,
+			ItemStatusTrading,
+			time.Now(),
+			targetItem.ID,
+		)
+		if err != nil {
+			log.Print(err)
+			chanError <- fmt.Errorf("db error")
+			return
+		}
+	}()
+
+	// 集荷予約作成の非同期処理
+	chanScr := make(chan *APIShipmentCreateRes, 1)
+	defer close(chanScr)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
+			ToAddress:   buyer.Address,
+			ToName:      buyer.AccountName,
+			FromAddress: seller.Address,
+			FromName:    seller.AccountName,
+		})
+		if err != nil {
+			log.Print(err)
+			chanError <- fmt.Errorf("failed to request to shipment service")
+			return
+		}
+		chanScr <- scr
+	}()
+
+	// 非同期処理待ち合わせ
+	wg.Wait()
+	if len(chanError) > 0 {
+		outputErrorMsg(c, http.StatusInternalServerError, (<-chanError).Error())
 		tx.Rollback()
 		return
 	}
 
-	transactionEvidenceID, err := result.LastInsertId()
-	if err != nil {
-		log.Print(err)
+	// 非同期処理結果収集
+	transactionEvidenceID := <-chanTransactionEvidenceID
+	scr := <-chanScr
 
-		outputErrorMsg(c, http.StatusInternalServerError, "db error")
-		tx.Rollback()
-		return
-	}
-
-	_, err = tx.Exec("UPDATE `items` SET `buyer_id` = ?, `status` = ?, `updated_at` = ? WHERE `id` = ?",
-		buyer.ID,
-		ItemStatusTrading,
-		time.Now(),
-		targetItem.ID,
-	)
-	if err != nil {
-		log.Print(err)
-
-		outputErrorMsg(c, http.StatusInternalServerError, "db error")
-		tx.Rollback()
-		return
-	}
-
-	scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
-		ToAddress:   buyer.Address,
-		ToName:      buyer.AccountName,
-		FromAddress: seller.Address,
-		FromName:    seller.AccountName,
-	})
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(c, http.StatusInternalServerError, "failed to request to shipment service")
-		tx.Rollback()
-
-		return
-	}
-
+	// 決済処理
 	pstr, err := APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
 		ShopID: PaymentServiceIsucariShopID,
 		Token:  rb.Token,
@@ -1765,7 +1800,7 @@ func postShip(c *gin.Context) {
 		return
 	}
 
-	err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `id` = ? FOR UPDATE", transactionEvidence.ID)
+	err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `id` = ?", transactionEvidence.ID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(c, http.StatusNotFound, "transaction_evidences not found")
 		tx.Rollback()
@@ -1874,28 +1909,24 @@ func postShipDone(c *gin.Context) {
 		return
 	}
 
-	tx := dbx.MustBegin()
-
 	item := Item{}
-	err = tx.Get(&item, "SELECT * FROM `items` WHERE `id` = ? FOR UPDATE", itemID)
+	err = dbx.Get(&item, "SELECT * FROM `items` WHERE `id` = ?", itemID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(c, http.StatusNotFound, "items not found")
-		tx.Rollback()
 		return
 	}
 	if err != nil {
 		log.Print(err)
 		outputErrorMsg(c, http.StatusInternalServerError, "db error")
-		tx.Rollback()
 		return
 	}
 
 	if item.Status != ItemStatusTrading {
 		outputErrorMsg(c, http.StatusForbidden, "商品が取引中ではありません")
-		tx.Rollback()
 		return
 	}
 
+	tx := dbx.MustBegin()
 	err = tx.Get(&transactionEvidence, "SELECT * FROM `transaction_evidences` WHERE `id` = ? FOR UPDATE", transactionEvidence.ID)
 	if err == sql.ErrNoRows {
 		outputErrorMsg(c, http.StatusNotFound, "transaction_evidences not found")
@@ -2068,22 +2099,22 @@ func postComplete(c *gin.Context) {
 		return
 	}
 
-	ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-		ReserveID: shipping.ReserveID,
-	})
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(c, http.StatusInternalServerError, "failed to request to shipment service")
-		tx.Rollback()
+	// ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+	// 	ReserveID: shipping.ReserveID,
+	// })
+	// if err != nil {
+	// 	log.Print(err)
+	// 	outputErrorMsg(c, http.StatusInternalServerError, "failed to request to shipment service")
+	// 	tx.Rollback()
 
-		return
-	}
+	// 	return
+	// }
 
-	if !(ssr.Status == ShippingsStatusDone) {
-		outputErrorMsg(c, http.StatusBadRequest, "shipment service側で配送完了になっていません")
-		tx.Rollback()
-		return
-	}
+	// if !(ssr.Status == ShippingsStatusDone) {
+	// 	outputErrorMsg(c, http.StatusBadRequest, "shipment service側で配送完了になっていません")
+	// 	tx.Rollback()
+	// 	return
+	// }
 
 	_, err = tx.Exec("UPDATE `shippings` SET `status` = ?, `updated_at` = ? WHERE `transaction_evidence_id` = ?",
 		ShippingsStatusDone,
